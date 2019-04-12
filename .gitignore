@@ -1,0 +1,4 @@
+tags
+*.db
+.env
+node_modules

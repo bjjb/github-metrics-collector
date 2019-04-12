@@ -1,0 +1,24 @@
+{
+  "name": "github-metrics-collector",
+  "version": "0.0.1",
+  "description": "Gather stats on GitHub pull requests",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/bjjb/github-metrics-collector.git"
+  },
+  "keywords": [
+    "GitHub",
+    "Metrics"
+  ],
+  "author": "bjjb",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/bjjb/github-metrics-collector/issues"
+  },
+  "homepage": "https://github.com/bjjb/github-metrics-collector#readme",
+  "dependencies": {
+    "github-graphql-api": "^1.0.6",
+    "sqlite3": "^4.0.6"
+  }
+}
