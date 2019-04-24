@@ -1,90 +1,123 @@
 const { GitHub }  = require('github-graphql-api');
-const { Database } = require('sqlite3').verbose()
+const Database = require('better-sqlite3')
 
-// Die if we're missing required info
-'TOKEN DB USER REPO'.split(' ').forEach((v) => {
-  if (!process.env[v]) {
-    console.error(`Missing env var: ${v}`)
-    process.exit(1)
-  }
-})
+function main() {
 
-const { TOKEN, DB } = process.env
-const [ USER, REPO ] = process.env.REPO.split('/')
+  const dsn = process.env.PULL_REQUESTS_DATABASE_PATH || ':memory:'
+  const db = new Database(dsn)
 
-const github = new GitHub({ token: TOKEN })
-const db = new Database(DB)
-
-main()
-
-async function main() {
-  // console.debug(TOKEN)
-  // process.exit(0)
-  setup()
-
-  if (!lastCursor()) await initialize()
-  await update()
+  setup(db)
+  update(db)
 }
 
-function setup() {
+// Ensures that the database schema is set up, and that we have the GitHub
+// repo and token, either from the settings table or from the environment.
+function setup(db) {
   const sql = `
     CREATE TABLE IF NOT EXISTS pull_requests(
       id TEXT PRIMARY KEY, data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS settings(
       key TEXT PRIMARY KEY, value TEXT NOT NULL);`
   db.exec(sql)
+
+  if (process.env['PULL_REQUESTS_GITHUB_TOKEN'])
+    set(db, 'token', process.env.PULL_REQUESTS_GITHUB_TOKEN)
+
+  if (!get(db, 'token'))
+    throw new Error('no PULL_REQUESTS_GITHUB_TOKEN')
+
+  if (process.env['PULL_REQUESTS_GITHUB_REPO'])
+    set(db, 'repo', process.env.PULL_REQUESTS_GITHUB_REPO)
+
+  if (!get(db, 'repo'))
+    throw new Error('no PULL_REQUESTS_GITHUB_REPO')
+
+  db.exec(sql)
 }
 
-function lastCursor() {
-  const sql = `select value from settings where key = 'last cursor' limit 1`
-  let lastCursor = null
-  db.get(sql, (err, row) => { if (row) lastCursor = row.value })
-  return lastCursor
+// Stores a value in the settings table under 'key'; returns the value
+function set(db, key, value) {
+  const sql = `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`
+  const stmt = db.prepare(sql)
+  stmt.run(key, value)
+  return value
 }
 
-async function initialize() {
-  console.debug('initializing...')
-  // Clear out the database
-  db.exec(`DELETE FROM pull_requests`)
-  db.exec(`DELETE FROM settings`)
-  // Fetch the pull requests from GitHub...
-  let gql = `
-    query { 
-      repository(owner:"${USER}", name:"${REPO}") { 
-        pullRequests(last:100, states:MERGED, orderBy: {
-          field:UPDATED_AT,
-          direction: ASC
-        }) {
-          edges {
-            node {
-              createdAt, closedAt, updatedAt, mergedAt, id
-            }
-            cursor
-          }
+// Gets the value from the settings table under 'key'
+function get(db, key) {
+  const stmt = db.prepare(`SELECT value FROM settings WHERE key = ?`)
+  const row = stmt.get(key)
+  if (!row) return undefined
+  return row.value
+}
+
+// Gets a GraphQL query for the last 100 PRs after the cursor.
+function makeQuery(owner, name, after) {
+  const vars = ['$owner: String!', '$name: String!']
+  const opts = [
+    'first: 100',
+    'states: MERGED',
+    'orderBy: { field: UPDATED_AT, direction: ASC }'
+  ]
+  if (after) {
+    vars.push('$after: String!')
+    opts.push('after: $after')
+  }
+  return `query(${vars.join(', ')}) {
+    repository(owner: $owner, name: $name) {
+      pullRequests(${opts.join(', ')}) {
+        edges {
+          node { createdAt, closedAt, updatedAt, mergedAt, id },
+          cursor
         }
       }
-    }`
-  console.debug(gql)
-  result = await github.query(gql)
-  const { repository: { pullRequests: { edges } } } = result
-  let lastCursor
-  edges.forEach(({ node, cursor }) => {
-    upsertPullRequest(node)
-    lastCursor = cursor
-  })
-  setLastCursor(lastCursor)
+    }
+  }`
 }
 
-async function update() {
-  console.debug('updating...')
+// Gets 100 pull requests from GitHub under owner/name after the cursor. If
+// the cursor is falsy, it gets the first 100.
+async function getPullRequests(after) {
+  const gql = makeQuery(owner, name, after)
+  const response = await gh.query(gql, { owner, name, after }) 
+  const { repository: { pullRequests: { edges } } } = response
+  return edges
 }
 
-function upsertPullRequest(node) {
+// Updates the database
+async function update(db) {
+  const token = get(db, 'token')
+  const repo = get(db, 'repo')
+
+  if (!repo)
+    throw new Error('repo not set')
+
+  const [owner, name] = repo.split('/')
+  const gh = new GitHub({ token })
+  const vars = { owner, name }
+  const after = get(db, 'last cursor')
+
+  if (after) // we have some data already; only get updated records
+    vars.after = after
+
+  const query = makeQuery(owner, name, after) 
+  const response = await gh.query(query, vars)
+  const edges = response.repository.pullRequests.edges
+
+  if (edges.length > 0) { // store and update cursor
+    edges.forEach(({ node }) => upsert(db, node))
+    set(db, 'last cursor', edges[edges.length - 1].cursor)
+  }
+
+  if (edges.length === 100) // there may be more PRs to fetch!
+    update(db)
+}
+
+function upsert(db, node) {
   const sql = `INSERT OR REPLACE INTO pull_requests (id, data) VALUES (?, ?)`
-  db.run(sql, node.id, JSON.stringify(node))
+  const stmt = db.prepare(sql)
+  stmt.run(node.id, JSON.stringify(node))
 }
 
-function setLastCursor(cursor) {
-  const sql = `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`
-  db.run(sql, 'last cursor', cursor)
-}
+if (require.main === module)
+  main()
